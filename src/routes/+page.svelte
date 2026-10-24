@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import {
 		expectedFilenames,
 		formatUnitRanges,
@@ -272,7 +272,8 @@
 		for (const side of sides) {
 			const name = imageFilename(current, side);
 			if (!available.has(name)) {
-				shownUrls = { ...shownUrls, [side]: undefined };
+				// untrack: reading shownUrls here would make this effect re-run itself.
+				untrack(() => (shownUrls = { ...shownUrls, [side]: undefined }));
 				continue;
 			}
 			imageUrl(name).then(
