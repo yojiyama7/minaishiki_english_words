@@ -765,7 +765,7 @@
 	}
 	.unit-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+		grid-template-columns: repeat(5, minmax(0, 1fr));
 		gap: 4px;
 	}
 	.unit-grid button {
