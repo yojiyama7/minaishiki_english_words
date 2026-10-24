@@ -18,6 +18,7 @@
 		readStoredImage,
 		storeImages
 	} from '$lib/local-library';
+	import { filesFromDataTransfer, splitImportFiles } from '$lib/import-source';
 	import { extractUnitImages } from '$lib/zip-import';
 
 	type ViewMode = Side | 'both';
@@ -37,6 +38,7 @@
 	let importNotice = $state('');
 	let dragging = $state(false);
 	let fileInput = $state<HTMLInputElement>();
+	let folderInput = $state<HTMLInputElement>();
 
 	const urlCache = new Map<string, Promise<string>>();
 	let shownUrls = $state<Partial<Record<Side, string>>>({});
@@ -125,15 +127,18 @@
 		stored = await listStoredImages();
 	}
 
-	async function importArchives(files: File[]) {
-		const archives = files.filter((file) => /\.zip$/i.test(file.name));
-		if (!archives.length || importing) return;
+	async function importFiles(files: File[]) {
+		if (importing) return;
 		importing = true;
 		importError = '';
 		importNotice = '';
 		const ignored: string[] = [];
 		try {
-			const totalBytes = archives.reduce((total, file) => total + file.size, 0);
+			const { archives, images: looseImages } = splitImportFiles(files);
+			if (!archives.length && !looseImages.length) {
+				throw new Error('Unit画像（unit001_Q.jpg など）またはZIPが見つかりませんでした。');
+			}
+			const totalBytes = [...archives, ...looseImages].reduce((total, file) => total + file.size, 0);
 			const available = await availableStorageBytes();
 			if (available !== undefined && available < totalBytes * 1.1) {
 				throw new Error(
@@ -142,6 +147,14 @@
 			}
 			await navigator.storage.persist?.().catch(() => false);
 
+			if (looseImages.length) {
+				let done = 0;
+				await storeImages(looseImages, (name) => {
+					done++;
+					stored = new Set(stored).add(name);
+					importProgress = `保存しています: ${done}/${looseImages.length}枚`;
+				});
+			}
 			for (const [index, archive] of archives.entries()) {
 				const label = `(${index + 1}/${archives.length}) ${archive.name}`;
 				importProgress = `解凍しています ${label}`;
@@ -181,6 +194,7 @@
 			importing = false;
 			importProgress = '';
 			if (fileInput) fileInput.value = '';
+			if (folderInput) folderInput.value = '';
 		}
 	}
 
@@ -196,7 +210,10 @@
 	function onDrop(event: DragEvent) {
 		event.preventDefault();
 		dragging = false;
-		importArchives([...(event.dataTransfer?.files ?? [])]);
+		if (!event.dataTransfer) return;
+		filesFromDataTransfer(event.dataTransfer).then(importFiles, (error) => {
+			importError = `ドロップされたファイルを読み込めませんでした。${error instanceof Error ? error.message : ''}`;
+		});
 	}
 
 	function onKeydown(event: KeyboardEvent) {
@@ -310,10 +327,17 @@
 <input
 	bind:this={fileInput}
 	type="file"
-	accept=".zip,application/zip"
+	accept=".zip,application/zip,.jpg,.jpeg,image/jpeg"
 	multiple
 	hidden
-	onchange={(event) => importArchives([...(event.currentTarget.files ?? [])])}
+	onchange={(event) => importFiles([...(event.currentTarget.files ?? [])])}
+/>
+<input
+	bind:this={folderInput}
+	type="file"
+	webkitdirectory
+	hidden
+	onchange={(event) => importFiles([...(event.currentTarget.files ?? [])])}
 />
 
 {#snippet importStatus()}
@@ -353,13 +377,18 @@
 		>
 			<h1>薬袋式英単語ビューア</h1>
 			<p>
-				お手元の <code>eitango_unit001-058.zip</code> 〜 <code>eitango_unit175-232.zip</code>
-				を選択してください。複数のZIPをまとめて選べます。
+				<code>unit001_Q.jpg</code>・<code>unit001_A.jpg</code>…
+				が入ったフォルダ、または <code>eitango_unit001-058.zip</code> などのZIPを選択してください。
 			</p>
-			<button class="primary" disabled={importing} onclick={() => fileInput?.click()}>
-				ZIPを選択
-			</button>
-			<p class="hint">ここにドラッグ＆ドロップもできます</p>
+			<div class="import-actions">
+				<button class="primary" disabled={importing} onclick={() => folderInput?.click()}>
+					フォルダを選択
+				</button>
+				<button class="secondary" disabled={importing} onclick={() => fileInput?.click()}>
+					ZIP・画像を選択
+				</button>
+			</div>
+			<p class="hint">フォルダやファイルをここにドラッグ＆ドロップもできます</p>
 			{@render importStatus()}
 			<p class="fine">
 				画像はこのブラウザの中で解凍し、端末内の保存領域に保管します。サーバーへは送信されません。2回目以降は取り込み済みの画像を使います。
@@ -433,7 +462,8 @@
 				</p>
 				{@render importStatus()}
 				<div class="library-actions">
-					<button disabled={importing} onclick={() => fileInput?.click()}>ZIPを追加取り込み</button>
+					<button disabled={importing} onclick={() => folderInput?.click()}>フォルダを取り込み</button>
+					<button disabled={importing} onclick={() => fileInput?.click()}>ZIP・画像を取り込み</button>
 					<button class="danger" disabled={importing} onclick={removeLibrary}>端末から削除</button>
 				</div>
 				<p class="fine">← → でユニット移動、Space で Q/A 切替。スマホは左右スワイプで移動。</p>
@@ -571,6 +601,22 @@
 		font-weight: 600;
 		font-size: 1rem;
 	}
+	.import-actions {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 8px;
+	}
+	.secondary {
+		margin-top: 8px;
+		background: none;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		padding: 11px 22px;
+		font-weight: 600;
+		font-size: 1rem;
+	}
+	.secondary:disabled,
 	.primary:disabled {
 		opacity: 0.5;
 		cursor: default;
