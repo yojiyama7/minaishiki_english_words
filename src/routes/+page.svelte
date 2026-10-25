@@ -51,6 +51,10 @@
 
 	const urlCache = new Map<string, Promise<string>>();
 	let shownUrls = $state<Record<string, string | undefined>>({});
+	/** Natural width / height of each shown image, needed to lay out rotated images. */
+	let imageRatios = $state<Record<string, number>>({});
+	// Rotating by 90° is a per-visit convenience on phones and tablets, so it is not remembered.
+	let rotated = $state(false);
 
 	const availableUnits = $derived(units.filter((u) => unitAvailable(u)));
 	const hasUnits = $derived(availableUnits.length > 0);
@@ -450,6 +454,18 @@
 				{/each}
 			</div>
 
+			<button
+				class="rotate-button"
+				aria-pressed={rotated}
+				aria-label="画像を90°回転"
+				title="画像を90°回転"
+				onclick={() => (rotated = !rotated)}
+			>
+				<svg viewBox="0 0 16 16" aria-hidden="true">
+					<path d="M12.5 7.5A5 5 0 1 1 9.5 3" /><path d="M9 1l1.5 2L8.5 4.5" />
+				</svg>
+			</button>
+
 			<nav class="pager" aria-label="ユニット移動">
 				<button aria-label="前のユニット" disabled={unit <= (availableUnits[0] ?? 1)} onclick={() => step(-1)}>
 					<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3L5 8l5 5" /></svg>
@@ -530,11 +546,21 @@
 					>
 						{#each viewKeys(unit, side, showOriginal) as key (key)}
 							{#if shownUrls[key]}
-								<img
-									src={shownUrls[key]}
-									alt="Unit {unit} {side === 'Q' ? '問題' : '解答'}"
-									draggable="false"
-								/>
+								<span
+									class="image-frame"
+									class:rotated={rotated && imageRatios[key]}
+									style:--ratio={imageRatios[key]}
+								>
+									<img
+										src={shownUrls[key]}
+										alt="Unit {unit} {side === 'Q' ? '問題' : '解答'}"
+										draggable="false"
+										onload={(event) => {
+											const image = event.currentTarget as HTMLImageElement;
+											imageRatios[key] = image.naturalWidth / image.naturalHeight;
+										}}
+									/>
+								</span>
 							{/if}
 						{/each}
 					</button>
@@ -879,6 +905,8 @@
 		display: grid;
 		gap: 16px;
 		padding: 16px;
+		/* An explicit column width: rotated images are absolutely positioned and give no width. */
+		grid-template-columns: minmax(0, 860px);
 		justify-content: center;
 		touch-action: pan-y pinch-zoom;
 	}
@@ -924,12 +952,59 @@
 	.image-button:disabled {
 		cursor: default;
 	}
-	.image-button img {
+	.image-frame {
+		display: block;
+		position: relative;
+		width: 100%;
+	}
+	.image-frame img {
 		display: block;
 		width: 100%;
 		height: auto;
 		user-select: none;
 		-webkit-user-select: none;
+	}
+	/* Rotated 90° clockwise: the frame takes the rotated shape and the image is turned into it. */
+	.image-frame.rotated {
+		aspect-ratio: 1 / var(--ratio);
+	}
+	.image-frame.rotated img {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: calc(100% * var(--ratio));
+		transform-origin: top left;
+		transform: rotate(90deg) translateY(-100%);
+	}
+	/* Rotation is offered on touch devices (phones and tablets) only. */
+	.rotate-button {
+		display: none;
+		width: 40px;
+		height: 40px;
+		place-items: center;
+		border: 1px solid var(--border);
+		background: var(--surface);
+		border-radius: 50%;
+		flex: none;
+	}
+	.rotate-button[aria-pressed='true'] {
+		background: var(--accent);
+		color: var(--accent-text);
+		border-color: var(--accent);
+	}
+	.rotate-button svg {
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	@media (hover: none) and (pointer: coarse) {
+		.rotate-button {
+			display: grid;
+		}
 	}
 	.first-page {
 		display: flex;
@@ -1002,9 +1077,13 @@
 		.segmented button {
 			padding: 6px 10px;
 		}
-		.pager button {
+		.pager button,
+		.rotate-button {
 			width: 36px;
 			height: 36px;
+		}
+		.unit-label {
+			display: none;
 		}
 	}
 	/* Phones: images span the full screen width. */
