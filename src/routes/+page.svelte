@@ -271,7 +271,9 @@
 		const dx = event.clientX - swipeStart.x;
 		const dy = event.clientY - swipeStart.y;
 		swipeStart = null;
-		if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
+		// In the rotated view the reader's horizontal swipe runs along the screen's vertical axis.
+		const [along, across] = rotated ? [dy, dx] : [dx, dy];
+		if (Math.abs(along) > 60 && Math.abs(along) > Math.abs(across) * 1.5) step(along < 0 ? 1 : -1);
 	}
 
 	onMount(() => {
@@ -531,6 +533,7 @@
 		<main
 			class="viewer"
 			class:both={mode === 'both'}
+			class:rotated
 			onpointerdown={onPointerDown}
 			onpointerup={onPointerUp}
 			onpointercancel={() => (swipeStart = null)}
@@ -912,7 +915,7 @@
 	}
 	.page {
 		margin: 0;
-		width: min(100%, 860px);
+		inline-size: min(100%, 860px);
 	}
 	.page figcaption {
 		display: flex;
@@ -920,7 +923,7 @@
 		gap: 8px;
 		font-size: 0.85rem;
 		color: var(--muted);
-		margin-bottom: 6px;
+		margin-block-end: 6px;
 	}
 	.side-tag {
 		display: inline-grid;
@@ -940,8 +943,9 @@
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
-		width: 100%;
-		padding: 10px 0;
+		inline-size: 100%;
+		padding-block: 10px;
+		padding-inline: 0;
 		border: none;
 		background: #fff;
 		border-radius: 10px;
@@ -955,7 +959,7 @@
 	.image-frame {
 		display: block;
 		position: relative;
-		width: 100%;
+		inline-size: 100%;
 	}
 	.image-frame img {
 		display: block;
@@ -1066,7 +1070,7 @@
 			align-items: start;
 		}
 		.viewer.both .page {
-			width: 100%;
+			inline-size: 100%;
 		}
 	}
 	@media (max-width: 420px) {
@@ -1089,17 +1093,32 @@
 	/* Phones: images span the full screen width. */
 	@media (max-width: 640px) {
 		.viewer {
-			padding: 12px 0;
+			padding-block: 12px;
+			padding-inline: 0;
 		}
 		.page {
-			width: 100%;
+			inline-size: 100%;
 		}
 		.page figcaption {
-			padding: 0 12px;
+			padding-inline: 12px;
 		}
 		.image-button {
 			border-radius: 0;
 			box-shadow: none;
 		}
+	}
+	/*
+	 * Rotated view: the whole viewer is laid out in vertical writing mode, so pages and images that
+	 * stack top to bottom are placed right to left. Turned to read, they stack top to bottom again.
+	 */
+	.viewer.rotated {
+		writing-mode: vertical-rl;
+		/* Physical sizes: the screen-sized viewport scrolls sideways through the rotated pages. */
+		width: 100%;
+		height: calc(100dvh - var(--topbar));
+		overflow-x: auto;
+		overflow-y: hidden;
+		grid-template-columns: minmax(0, 860px);
+		touch-action: pan-x pinch-zoom;
 	}
 </style>

@@ -18,7 +18,9 @@ export async function renderPage(pdf: PDFDocumentProxy, pageNumber: number, widt
 	const canvas = document.createElement('canvas');
 	canvas.width = Math.round(viewport.width);
 	canvas.height = Math.round(viewport.height);
-	await page.render({ canvas, viewport }).promise;
+	// The print intent renders without requestAnimationFrame, which stalls while the page is not
+	// being painted (a background tab, or a hidden preview).
+	await page.render({ canvas, viewport, intent: 'print' }).promise;
 	page.cleanup();
 	return canvas;
 }
