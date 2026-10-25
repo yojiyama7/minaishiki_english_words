@@ -30,3 +30,6 @@ vite.config.ts.timestamp-*
 *.[pP][nN][gG]
 *.[pP][dD][fF]
 /.claude/settings.local.json
+
+# Python
+__pycache__/

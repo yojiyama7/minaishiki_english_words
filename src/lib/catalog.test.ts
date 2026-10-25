@@ -1,28 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-	archiveImageName,
-	expectedFilenames,
 	formatUnitRanges,
 	imageFilename,
-	parseLocation
+	isLegacyImage,
+	parseLocation,
+	requiredFilenames
 } from './catalog.ts';
 
-test('catalog lists a question and an answer image for every unit', () => {
-	assert.equal(expectedFilenames.length, 464);
-	assert.equal(new Set(expectedFilenames).size, 464);
-	assert.equal(imageFilename(7, 'A'), 'unit007_A.jpg');
-	assert.equal(expectedFilenames.at(-1), 'unit232_A.jpg');
+test('every unit needs the text image of both sides', () => {
+	assert.equal(requiredFilenames.length, 464);
+	assert.equal(new Set(requiredFilenames).size, 464);
+	assert.equal(imageFilename(7, 'A', 'panel'), 'unit007_A_panel.jpg');
+	assert.equal(requiredFilenames.at(-1), 'unit232_A_text.jpg');
 });
 
-test('archive entries are matched by basename and normalized', () => {
-	assert.equal(archiveImageName('unit001_Q.jpg'), 'unit001_Q.jpg');
-	assert.equal(archiveImageName('eitango/unit058_a.JPEG'), 'unit058_A.jpg');
-	assert.equal(archiveImageName('unit12_Q.jpg'), 'unit012_Q.jpg');
-	assert.equal(archiveImageName('unit233_Q.jpg'), null);
-	assert.equal(archiveImageName('unit000_Q.jpg'), null);
-	assert.equal(archiveImageName('__MACOSX/._unit001_Q.jpg'), null);
-	assert.equal(archiveImageName('notes.txt'), null);
+test('whole images from the ZIP import are recognised as legacy', () => {
+	assert.equal(isLegacyImage('unit001_Q.jpg'), true);
+	assert.equal(isLegacyImage('unit001_Q_text.jpg'), false);
+	assert.equal(isLegacyImage('book.pdf'), false);
 });
 
 test('unit ranges are collapsed for messages', () => {

@@ -1,4 +1,5 @@
-// Unit images live only in this browser's origin-private file system (OPFS).
+// The imported book and its cropped unit images live only in this browser's origin-private
+// file system (OPFS).
 const imagesDirectoryName = 'unit-images';
 
 async function getImagesDirectory(create = false): Promise<FileSystemDirectoryHandle | null> {
@@ -9,8 +10,8 @@ async function getImagesDirectory(create = false): Promise<FileSystemDirectoryHa
 	});
 }
 
-/** Names of the images that have been fully written. */
-export async function listStoredImages(): Promise<Set<string>> {
+/** Names of the files that have been fully written. */
+export async function listStoredFiles(): Promise<Set<string>> {
 	const directory = await getImagesDirectory();
 	const names = new Set<string>();
 	if (!directory) return names;
@@ -22,11 +23,11 @@ export async function listStoredImages(): Promise<Set<string>> {
 	return names;
 }
 
-export async function storeImages(files: readonly File[], onStored: (name: string) => void) {
+export async function storeFiles(files: readonly File[], onStored: (name: string) => void = () => {}) {
 	const directory = (await getImagesDirectory(true))!;
 	for (const file of files) {
 		const handle = await directory.getFileHandle(file.name, { create: true });
-		// createWritable writes to a swap file, so an interrupted import never leaves a partial image.
+		// createWritable writes to a swap file, so an interrupted import never leaves a partial file.
 		const writable = await handle.createWritable();
 		try {
 			await file.stream().pipeTo(writable);
@@ -38,13 +39,13 @@ export async function storeImages(files: readonly File[], onStored: (name: strin
 	}
 }
 
-export async function readStoredImage(name: string): Promise<File> {
+export async function readStoredFile(name: string): Promise<File> {
 	const directory = await getImagesDirectory();
 	if (!directory) throw new Error('教材が保存されていません。');
 	return (await directory.getFileHandle(name)).getFile();
 }
 
-export async function deleteStoredImages(): Promise<void> {
+export async function deleteStoredFiles(): Promise<void> {
 	const root = await navigator.storage.getDirectory();
 	await root.removeEntry(imagesDirectoryName, { recursive: true }).catch((error) => {
 		if (!(error instanceof DOMException && error.name === 'NotFoundError')) throw error;

@@ -1,58 +1,64 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
+	import type { PDFDocumentProxy } from 'pdfjs-dist';
 	import {
-		expectedFilenames,
+		bookFilename,
+		bookSettingsFilename,
+		defaultFirstPage,
 		formatUnitRanges,
 		imageFilename,
+		isLegacyImage,
 		isUnit,
 		parseLocation,
 		unitCount,
 		units,
+		type BookSettings,
+		type Part,
 		type Side
 	} from '$lib/catalog';
+	import { unitPages } from '$lib/crop-layout';
 	import {
 		availableStorageBytes,
-		deleteStoredImages,
+		deleteStoredFiles,
 		formatBytes,
-		listStoredImages,
-		readStoredImage,
-		storeImages
+		listStoredFiles,
+		readStoredFile,
+		storeFiles
 	} from '$lib/local-library';
-	import { filesFromDataTransfer, splitImportFiles } from '$lib/import-source';
-	import { extractUnitImages } from '$lib/zip-import';
 
 	type ViewMode = Side | 'both';
+	const parts: Part[] = ['text', 'panel'];
 	const lastLocationKey = 'minaishiki:last-location';
 	const viewModeKey = 'minaishiki:view-mode';
+	const firstPageKey = 'minaishiki:first-page';
 
 	let status = $state<'loading' | 'unsupported' | 'ready'>('loading');
 	let stored = $state(new Set<string>());
+	let settings = $state<BookSettings | null>(null);
 	let unit = $state(1);
 	let mode = $state<ViewMode>('Q');
+	let showOriginal = $state(false);
 	let drawerOpen = $state(false);
 	let jumpValue = $state('');
 
+	let firstPageInput = $state(String(defaultFirstPage));
 	let importing = $state(false);
 	let importProgress = $state('');
 	let importError = $state('');
 	let importNotice = $state('');
 	let dragging = $state(false);
 	let fileInput = $state<HTMLInputElement>();
-	let folderInput = $state<HTMLInputElement>();
 
 	const urlCache = new Map<string, Promise<string>>();
-	let shownUrls = $state<Partial<Record<Side, string>>>({});
+	let shownUrls = $state<Record<string, string | undefined>>({});
 
-	const hasImages = $derived(stored.size > 0);
-	const isComplete = $derived(expectedFilenames.every((name) => stored.has(name)));
-	const missingUnits = $derived(
-		units.filter((u) => !stored.has(imageFilename(u, 'Q')) || !stored.has(imageFilename(u, 'A')))
-	);
-	const availableUnits = $derived(units.filter((u) => !missingUnits.includes(u)));
+	const availableUnits = $derived(units.filter((u) => unitAvailable(u)));
+	const hasUnits = $derived(availableUnits.length > 0);
+	const hasLegacyImages = $derived([...stored].some(isLegacyImage));
 	const visibleSides = $derived<Side[]>(mode === 'both' ? ['Q', 'A'] : [mode]);
 
 	function unitAvailable(u: number) {
-		return stored.has(imageFilename(u, 'Q')) || stored.has(imageFilename(u, 'A'));
+		return stored.has(imageFilename(u, 'Q', 'text')) && stored.has(imageFilename(u, 'A', 'text'));
 	}
 
 	function readSetting(key: string): string | null {
@@ -71,20 +77,38 @@
 		}
 	}
 
-	function imageUrl(name: string): Promise<string> {
-		let url = urlCache.get(name);
+	function cachedUrl(key: string, load: () => Promise<Blob>): Promise<string> {
+		let url = urlCache.get(key);
 		if (!url) {
-			url = readStoredImage(name).then((file) => URL.createObjectURL(file));
-			url.catch(() => urlCache.delete(name));
-			urlCache.set(name, url);
+			url = load().then((blob) => URL.createObjectURL(blob));
+			url.catch(() => urlCache.delete(key));
+			urlCache.set(key, url);
 		}
 		return url;
+	}
+
+	const imageUrl = (name: string) => cachedUrl(name, () => readStoredFile(name));
+
+	// The original pages are rendered from the stored PDF only when asked for.
+	let pdfPromise: Promise<PDFDocumentProxy> | null = null;
+	function originalPageUrl(page: number) {
+		return cachedUrl(`page:${page}`, async () => {
+			const { openPdf, renderPage } = await import('$lib/pdf-import');
+			pdfPromise ??= readStoredFile(bookFilename).then(openPdf);
+			pdfPromise.catch(() => (pdfPromise = null));
+			const canvas = await renderPage(await pdfPromise, page, 1100);
+			return new Promise<Blob>((resolve, reject) =>
+				canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('render failed'))), 'image/jpeg', 0.85)
+			);
+		});
 	}
 
 	function clearUrlCache() {
 		for (const url of urlCache.values()) url.then(URL.revokeObjectURL, () => undefined);
 		urlCache.clear();
 		shownUrls = {};
+		pdfPromise?.then((pdf) => pdf.loadingTask.destroy(), () => undefined);
+		pdfPromise = null;
 	}
 
 	function applyLocation(hash: string) {
@@ -123,69 +147,72 @@
 		}
 	}
 
-	async function refreshStored() {
-		stored = await listStoredImages();
+	async function refreshStored(): Promise<BookSettings | null> {
+		stored = await listStoredFiles();
+		settings = stored.has(bookSettingsFilename)
+			? JSON.parse(await (await readStoredFile(bookSettingsFilename)).text())
+			: null;
+		return settings;
 	}
 
-	async function importFiles(files: File[]) {
-		if (importing) return;
-		importing = true;
+	async function importPdf(file: File | undefined) {
+		if (!file || importing) return;
+		const firstPage = Number(firstPageInput);
 		importError = '';
 		importNotice = '';
-		const ignored: string[] = [];
+		if (!Number.isInteger(firstPage) || firstPage < 1) {
+			importError = 'Unit 1 のページ番号を入力してください。';
+			return;
+		}
+		if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
+			importError = 'PDFファイルを選択してください。';
+			return;
+		}
+		importing = true;
+		writeSetting(firstPageKey, String(firstPage));
 		try {
-			const { archives, images: looseImages } = splitImportFiles(files);
-			if (!archives.length && !looseImages.length) {
-				throw new Error('Unit画像（unit001_Q.jpg など）またはZIPが見つかりませんでした。');
-			}
-			const totalBytes = [...archives, ...looseImages].reduce((total, file) => total + file.size, 0);
+			// The PDF is kept for the original-page view; the crops add roughly twice its size.
+			const needed = file.size * 3;
 			const available = await availableStorageBytes();
-			if (available !== undefined && available < totalBytes * 1.1) {
+			if (available !== undefined && available < needed) {
 				throw new Error(
-					`端末の空き容量が足りません（必要: 約${formatBytes(totalBytes)}、空き: ${formatBytes(available)}）。`
+					`端末の空き容量が足りません（必要: 約${formatBytes(needed)}、空き: ${formatBytes(available)}）。`
 				);
 			}
 			await navigator.storage.persist?.().catch(() => false);
 
-			if (looseImages.length) {
-				let done = 0;
-				await storeImages(looseImages, (name) => {
-					done++;
-					stored = new Set(stored).add(name);
-					importProgress = `保存しています: ${done}/${looseImages.length}枚`;
+			importProgress = 'PDFを開いています';
+			const { openPdf, cropBook } = await import('$lib/pdf-import');
+			let pdf: PDFDocumentProxy;
+			try {
+				pdf = await openPdf(file);
+			} catch (error) {
+				throw new Error(`PDFを開けませんでした。${error instanceof Error ? error.message : ''}`);
+			}
+			try {
+				clearUrlCache();
+				await deleteStoredFiles();
+				stored = new Set();
+				settings = null;
+				const fallbackUnits: number[] = [];
+				await cropBook(pdf, firstPage, async (cropped, done, total) => {
+					await storeFiles(cropped.files);
+					fallbackUnits.push(...cropped.fallbackUnits);
+					importProgress = `切り出しています: Unit ${done * 2}/${unitCount}（${Math.round((done / total) * 100)}%）`;
 				});
+				importProgress = 'PDFを保存しています';
+				const bookSettings: BookSettings = { firstPage, fallbackUnits };
+				await storeFiles([
+					new File([file], bookFilename, { type: 'application/pdf' }),
+					new File([JSON.stringify(bookSettings)], bookSettingsFilename, { type: 'application/json' })
+				]);
+			} finally {
+				await pdf.loadingTask.destroy();
 			}
-			for (const [index, archive] of archives.entries()) {
-				const label = `(${index + 1}/${archives.length}) ${archive.name}`;
-				importProgress = `解凍しています ${label}`;
-				let images: File[];
-				try {
-					images = await extractUnitImages(archive);
-				} catch (error) {
-					throw new Error(
-						`${archive.name} を解凍できませんでした。${error instanceof Error ? error.message : ''}`
-					);
-				}
-				if (!images.length) {
-					ignored.push(archive.name);
-					continue;
-				}
-				let done = 0;
-				await storeImages(images, (name) => {
-					done++;
-					stored = new Set(stored).add(name);
-					importProgress = `保存しています ${label}: ${done}/${images.length}枚`;
-				});
-			}
-			await refreshStored();
-			const notices: string[] = [];
-			if (ignored.length) notices.push(`Unit画像が入っていないため無視しました: ${ignored.join(', ')}`);
-			if (missingUnits.length) {
-				notices.push(`まだ取り込まれていないUnit: ${formatUnitRanges(missingUnits)}`);
-			} else {
-				notices.push(`全${unitCount}ユニットの取り込みが完了しました。`);
-			}
-			importNotice = notices.join('\n');
+			const imported = await refreshStored();
+			importNotice = imported?.fallbackUnits.length
+				? `自動で切り出せなかったUnit（ページの半分を表示します）: ${formatUnitRanges(imported.fallbackUnits)}`
+				: `全${unitCount}ユニットを切り出しました。`;
 			if (!unitAvailable(unit) && availableUnits.length) unit = availableUnits[0];
 		} catch (error) {
 			importError = error instanceof Error ? error.message : String(error);
@@ -194,14 +221,13 @@
 			importing = false;
 			importProgress = '';
 			if (fileInput) fileInput.value = '';
-			if (folderInput) folderInput.value = '';
 		}
 	}
 
 	async function removeLibrary() {
-		if (!confirm('この端末に保存した教材画像をすべて削除しますか？')) return;
+		if (!confirm('この端末に保存した教材（PDFと切り出した画像）をすべて削除しますか？')) return;
 		clearUrlCache();
-		await deleteStoredImages();
+		await deleteStoredFiles();
 		await refreshStored();
 		importNotice = '';
 		drawerOpen = false;
@@ -210,14 +236,11 @@
 	function onDrop(event: DragEvent) {
 		event.preventDefault();
 		dragging = false;
-		if (!event.dataTransfer) return;
-		filesFromDataTransfer(event.dataTransfer).then(importFiles, (error) => {
-			importError = `ドロップされたファイルを読み込めませんでした。${error instanceof Error ? error.message : ''}`;
-		});
+		importPdf(event.dataTransfer?.files[0]);
 	}
 
 	function onKeydown(event: KeyboardEvent) {
-		if (status !== 'ready' || !hasImages) return;
+		if (status !== 'ready' || !hasUnits || importing) return;
 		const target = event.target as HTMLElement;
 		if (target.closest('input, textarea, select')) return;
 		if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -230,6 +253,7 @@
 		} else if (event.key === 'q') mode = 'Q';
 		else if (event.key === 'a') mode = 'A';
 		else if (event.key === 'b') mode = 'both';
+		else if (event.key === 'o') showOriginal = !showOriginal;
 		else return;
 		event.preventDefault();
 	}
@@ -253,6 +277,7 @@
 		}
 		if (!applyLocation(location.hash)) applyLocation(readSetting(lastLocationKey) ?? '');
 		if (readSetting(viewModeKey) === 'both') mode = 'both';
+		firstPageInput = readSetting(firstPageKey) ?? firstPageInput;
 		const onHashChange = () => applyLocation(location.hash);
 		addEventListener('hashchange', onHashChange);
 		refreshStored().then(
@@ -280,32 +305,43 @@
 		writeSetting(viewModeKey, mode === 'both' ? 'both' : 'single');
 	});
 
+	function viewKeys(u: number, side: Side, original: boolean): string[] {
+		if (original && settings) {
+			const pages = unitPages(u, settings.firstPage);
+			return [`page:${side === 'Q' ? pages.q : pages.a}`];
+		}
+		return parts.map((part) => imageFilename(u, side, part));
+	}
+
+	function loadView(key: string): Promise<string> | null {
+		if (key.startsWith('page:')) return originalPageUrl(Number(key.slice(5)));
+		return stored.has(key) ? imageUrl(key) : null;
+	}
+
 	// Load the visible images, then warm up the neighbours so paging feels instant.
 	$effect(() => {
 		const current = unit;
-		const sides = visibleSides;
+		const keys = visibleSides.flatMap((side) => viewKeys(current, side, showOriginal));
 		const available = stored;
 		let cancelled = false;
-		for (const side of sides) {
-			const name = imageFilename(current, side);
-			if (!available.has(name)) {
-				// untrack: reading shownUrls here would make this effect re-run itself.
-				untrack(() => (shownUrls = { ...shownUrls, [side]: undefined }));
-				continue;
-			}
-			imageUrl(name).then(
-				(url) => {
-					if (!cancelled) shownUrls = { ...shownUrls, [side]: url };
+		for (const key of keys) {
+			const url = loadView(key);
+			if (!url) continue;
+			url.then(
+				(value) => {
+					// untrack: reading shownUrls here would make this effect re-run itself.
+					if (!cancelled) untrack(() => (shownUrls = { ...shownUrls, [key]: value }));
 				},
 				() => undefined
 			);
 		}
 		const preload = setTimeout(() => {
 			for (const neighbour of [current + 1, current - 1, current]) {
+				if (!isUnit(neighbour)) continue;
 				for (const side of ['Q', 'A'] as const) {
-					const name = imageFilename(neighbour, side);
-					if (isUnit(neighbour) && available.has(name)) {
-						imageUrl(name).then((url) => (new Image().src = url), () => undefined);
+					for (const part of parts) {
+						const name = imageFilename(neighbour, side, part);
+						if (available.has(name)) imageUrl(name).then((url) => (new Image().src = url), () => undefined);
 					}
 				}
 			}
@@ -327,17 +363,9 @@
 <input
 	bind:this={fileInput}
 	type="file"
-	accept=".zip,application/zip,.jpg,.jpeg,image/jpeg"
-	multiple
+	accept=".pdf,application/pdf"
 	hidden
-	onchange={(event) => importFiles([...(event.currentTarget.files ?? [])])}
-/>
-<input
-	bind:this={folderInput}
-	type="file"
-	webkitdirectory
-	hidden
-	onchange={(event) => importFiles([...(event.currentTarget.files ?? [])])}
+	onchange={(event) => importPdf(event.currentTarget.files?.[0])}
 />
 
 {#snippet importStatus()}
@@ -352,6 +380,13 @@
 	{/if}
 {/snippet}
 
+{#snippet firstPageField()}
+	<label class="first-page">
+		Unit 1 のページ番号
+		<input type="number" inputmode="numeric" min="1" disabled={importing} bind:value={firstPageInput} />
+	</label>
+{/snippet}
+
 {#if status === 'loading'}
 	<main class="centered"><p class="muted">読み込んでいます…</p></main>
 {:else if status === 'unsupported'}
@@ -361,7 +396,7 @@
 			<p>教材を端末内に保存する機能（Origin Private File System）に対応した、最新のChrome・Edge・Safari・Firefoxで開いてください。</p>
 		</div>
 	</main>
-{:else if !hasImages}
+{:else if importing || !hasUnits}
 	<main class="centered">
 		<div
 			class="card import-card"
@@ -377,21 +412,19 @@
 		>
 			<h1>薬袋式英単語ビューア</h1>
 			<p>
-				<code>unit001_Q.jpg</code>・<code>unit001_A.jpg</code>…
-				が入ったフォルダ、または <code>eitango_unit001-058.zip</code> などのZIPを選択してください。
+				『薬袋式英単語暗記法』をスキャンしたPDFと、Unit 1 が載っているページ番号（PDFビューアでの番号）を指定してください。
 			</p>
+			{@render firstPageField()}
 			<div class="import-actions">
-				<button class="primary" disabled={importing} onclick={() => folderInput?.click()}>
-					フォルダを選択
-				</button>
-				<button class="secondary" disabled={importing} onclick={() => fileInput?.click()}>
-					ZIP・画像を選択
-				</button>
+				<button class="primary" disabled={importing} onclick={() => fileInput?.click()}>PDFを選択</button>
 			</div>
-			<p class="hint">フォルダやファイルをここにドラッグ＆ドロップもできます</p>
+			<p class="hint">PDFをここにドラッグ＆ドロップもできます</p>
+			{#if hasLegacyImages && !importing}
+				<p class="message notice">以前の形式（ZIP・フォルダ）で取り込んだ画像が残っています。PDFを取り込むと置き換わります。</p>
+			{/if}
 			{@render importStatus()}
 			<p class="fine">
-				画像はこのブラウザの中で解凍し、端末内の保存領域に保管します。サーバーへは送信されません。2回目以降は取り込み済みの画像を使います。
+				PDFはこのブラウザの中でページを描画し、Unitごとに「問題文・訳文」と「CHECK YOUR VOCABULARY・ANSWERS」の枠を切り出して端末内の保存領域に保管します。サーバーへは送信されません。2回目以降は取り込み済みのデータを使います。
 			</p>
 		</div>
 	</main>
@@ -456,17 +489,23 @@
 				{/each}
 			</div>
 			<section class="library">
-				<p class="muted">
-					保存済み {stored.size}/{expectedFilenames.length}枚
-					{#if !isComplete}<br />未取り込み: Unit {formatUnitRanges(missingUnits)}{/if}
-				</p>
+				<label class="toggle">
+					<input type="checkbox" bind:checked={showOriginal} disabled={!stored.has(bookFilename)} />
+					元のページを表示
+				</label>
+				{#if settings}
+					<p class="muted">
+						PDFの {settings.firstPage} ページを Unit 1 として取り込み済み
+						{#if settings.fallbackUnits.length}<br />自動で切り出せなかったUnit: {formatUnitRanges(settings.fallbackUnits)}{/if}
+					</p>
+				{/if}
 				{@render importStatus()}
+				{@render firstPageField()}
 				<div class="library-actions">
-					<button disabled={importing} onclick={() => folderInput?.click()}>フォルダを取り込み</button>
-					<button disabled={importing} onclick={() => fileInput?.click()}>ZIP・画像を取り込み</button>
+					<button disabled={importing} onclick={() => fileInput?.click()}>PDFを取り込み直す</button>
 					<button class="danger" disabled={importing} onclick={removeLibrary}>端末から削除</button>
 				</div>
-				<p class="fine">← → でユニット移動、Space で Q/A 切替。スマホは左右スワイプで移動。</p>
+				<p class="fine">← → でユニット移動、Space で Q/A 切替、O で元のページ。スマホは左右スワイプで移動。</p>
 			</section>
 		</aside>
 		{#if drawerOpen}
@@ -483,18 +522,22 @@
 			{#each visibleSides as side (side)}
 				<figure class="page">
 					<figcaption><span class="side-tag" data-side={side}>{side}</span> Unit {unit}</figcaption>
-					{#if !stored.has(imageFilename(unit, side))}
-						<p class="missing">この画像はまだ取り込まれていません</p>
-					{:else if shownUrls[side]}
-						<button
-							class="image-button"
-							disabled={mode === 'both'}
-							aria-label={mode === 'both' ? undefined : side === 'Q' ? 'Aを表示' : 'Qを表示'}
-							onclick={toggleSide}
-						>
-							<img src={shownUrls[side]} alt="Unit {unit} {side === 'Q' ? '問題' : '解答'}" draggable="false" />
-						</button>
-					{/if}
+					<button
+						class="image-button"
+						disabled={mode === 'both'}
+						aria-label={mode === 'both' ? undefined : side === 'Q' ? 'Aを表示' : 'Qを表示'}
+						onclick={toggleSide}
+					>
+						{#each viewKeys(unit, side, showOriginal) as key (key)}
+							{#if shownUrls[key]}
+								<img
+									src={shownUrls[key]}
+									alt="Unit {unit} {side === 'Q' ? '問題' : '解答'}"
+									draggable="false"
+								/>
+							{/if}
+						{/each}
+					</button>
 				</figure>
 			{/each}
 		</main>
@@ -584,13 +627,6 @@
 		border-color: var(--accent);
 		background: var(--surface-2);
 	}
-	code {
-		font-size: 0.85em;
-		background: var(--surface-2);
-		padding: 1px 5px;
-		border-radius: 4px;
-		word-break: break-all;
-	}
 	.primary {
 		margin-top: 8px;
 		background: var(--accent);
@@ -607,16 +643,6 @@
 		justify-content: center;
 		gap: 8px;
 	}
-	.secondary {
-		margin-top: 8px;
-		background: none;
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		padding: 11px 22px;
-		font-weight: 600;
-		font-size: 1rem;
-	}
-	.secondary:disabled,
 	.primary:disabled {
 		opacity: 0.5;
 		cursor: default;
@@ -883,9 +909,11 @@
 		background: var(--a);
 	}
 	.image-button {
-		display: block;
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
 		width: 100%;
-		padding: 0;
+		padding: 10px 0;
 		border: none;
 		background: #fff;
 		border-radius: 10px;
@@ -903,12 +931,33 @@
 		user-select: none;
 		-webkit-user-select: none;
 	}
-	.missing {
-		padding: 48px 16px;
-		text-align: center;
-		color: var(--muted);
-		border: 1px dashed var(--border);
-		border-radius: 10px;
+	.first-page {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		margin: 12px 0;
+		font-size: 0.9rem;
+	}
+	.first-page input {
+		width: 5.5em;
+		font: inherit;
+		font-size: 16px;
+		padding: 6px 8px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--bg);
+		color: var(--text);
+	}
+	.library .first-page {
+		justify-content: flex-start;
+	}
+	.toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 0.9rem;
+		margin: 4px 0 8px;
 	}
 
 	@media (min-width: 960px) {
@@ -936,17 +985,6 @@
 		}
 		.unit-button svg {
 			display: none;
-		}
-		/* Fit a single page to the window so it can be read without scrolling. */
-		.viewer:not(.both) .image-button {
-			width: fit-content;
-			max-width: 100%;
-			margin: 0 auto;
-		}
-		.viewer:not(.both) .image-button img {
-			width: auto;
-			max-width: 100%;
-			max-height: calc(100dvh - var(--topbar) - 68px);
 		}
 		.viewer.both {
 			grid-template-columns: repeat(2, minmax(0, 1fr));

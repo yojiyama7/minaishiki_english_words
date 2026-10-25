@@ -1,6 +1,17 @@
 export const unitCount = 232;
 
 export type Side = 'Q' | 'A';
+/** The sentences, and the CHECK YOUR VOCABULARY box (Q) or the ANSWERS panel (A). */
+export type Part = 'text' | 'panel';
+
+/** The page number (1-based) of Unit 1 in the scanned book. */
+export const defaultFirstPage = 54;
+
+/** The imported PDF and its settings, kept next to the cropped images. */
+export const bookFilename = 'book.pdf';
+export const bookSettingsFilename = 'book.json';
+
+export type BookSettings = { firstPage: number; fallbackUnits: number[] };
 
 export const units: readonly number[] = Array.from({ length: unitCount }, (_, index) => index + 1);
 
@@ -8,23 +19,19 @@ export function isUnit(value: number): boolean {
 	return Number.isInteger(value) && value >= 1 && value <= unitCount;
 }
 
-export function imageFilename(unit: number, side: Side): string {
-	return `unit${String(unit).padStart(3, '0')}_${side}.jpg`;
+export function imageFilename(unit: number, side: Side, part: Part): string {
+	return `unit${String(unit).padStart(3, '0')}_${side}_${part}.jpg`;
 }
 
-export const expectedFilenames: readonly string[] = units.flatMap((unit) => [
-	imageFilename(unit, 'Q'),
-	imageFilename(unit, 'A')
+/** Every unit has at least the text image of both sides (the panel is missing when detection failed). */
+export const requiredFilenames: readonly string[] = units.flatMap((unit) => [
+	imageFilename(unit, 'Q', 'text'),
+	imageFilename(unit, 'A', 'text')
 ]);
 
-/** Returns the catalog filename for an archive entry, or null when the entry is not a unit image. */
-export function archiveImageName(path: string): string | null {
-	const segments = path.split(/[/\\]/);
-	if (segments.some((segment) => segment === '__MACOSX' || segment.startsWith('._'))) return null;
-	const match = /^unit(\d{1,3})_([QA])\.jpe?g$/i.exec(segments.at(-1) ?? '');
-	if (!match) return null;
-	const unit = Number(match[1]);
-	return isUnit(unit) ? imageFilename(unit, match[2].toUpperCase() as Side) : null;
+/** Images imported by earlier versions from ZIPs or folders (whole, uncropped unit images). */
+export function isLegacyImage(name: string): boolean {
+	return /^unit\d{3}_[QA]\.jpg$/.test(name);
 }
 
 /** Collapses unit numbers into readable ranges such as "1–3, 7". */
