@@ -968,8 +968,21 @@
 			width: 36px;
 			height: 36px;
 		}
+	}
+	/* Phones: images span the full screen width. */
+	@media (max-width: 640px) {
 		.viewer {
-			padding: 12px 8px;
+			padding: 12px 0;
+		}
+		.page {
+			width: 100%;
+		}
+		.page figcaption {
+			padding: 0 12px;
+		}
+		.image-button {
+			border-radius: 0;
+			box-shadow: none;
 		}
 	}
 </style>
