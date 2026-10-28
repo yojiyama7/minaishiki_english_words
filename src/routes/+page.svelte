@@ -48,6 +48,7 @@
 	let importNotice = $state('');
 	let dragging = $state(false);
 	let fileInput = $state<HTMLInputElement>();
+	let jumpInput = $state<HTMLInputElement>();
 
 	const urlCache = new Map<string, Promise<string>>();
 	let shownUrls = $state<Record<string, string | undefined>>({});
@@ -148,6 +149,8 @@
 		if (isUnit(value)) {
 			goTo(value);
 			jumpValue = '';
+			// Hand the keyboard back to the viewer shortcuts.
+			jumpInput?.blur();
 		}
 	}
 
@@ -258,7 +261,12 @@
 		else if (event.key === 'a') mode = 'A';
 		else if (event.key === 'b') mode = 'both';
 		else if (event.key === 'o') showOriginal = !showOriginal;
-		else return;
+		else if (/^[0-9]$/.test(event.key)) {
+			// Typing a number starts a jump: the digit lands in the Unit field, which keeps the focus.
+			jumpValue = event.key;
+			drawerOpen = true;
+			jumpInput?.focus({ preventScroll: true });
+		} else return;
 		event.preventDefault();
 	}
 
@@ -491,6 +499,7 @@
 					max={unitCount}
 					placeholder="Unit番号"
 					aria-label="Unit番号を入力して移動"
+					bind:this={jumpInput}
 					bind:value={jumpValue}
 				/>
 				<button type="submit">移動</button>
